@@ -4,6 +4,24 @@
 #include "config.h"
 #if CONFIG_USE_LWIP
 #include <lwip/sockets.h>
+#include <lwip/inet.h>
+/* Stub sockaddr_in6 for lwIP builds without IPv6 */
+#if !defined(LWIP_IPV6) || !LWIP_IPV6
+#ifndef _SOCKADDR_IN6_DEFINED
+#define _SOCKADDR_IN6_DEFINED
+#ifndef INET6_ADDRSTRLEN
+#define INET6_ADDRSTRLEN 46
+#endif
+struct sockaddr_in6 {
+  uint8_t          sin6_len;
+  uint8_t          sin6_family;
+  uint16_t         sin6_port;
+  uint32_t         sin6_flowinfo;
+  struct in6_addr  sin6_addr;
+  uint32_t         sin6_scope_id;
+};
+#endif
+#endif
 #else
 #include <arpa/inet.h>
 #include <sys/socket.h>

@@ -30,6 +30,7 @@ int ports_get_host_addr(Address* addr, const char* iface_prefix) {
   for (netif = netif_list; netif != NULL; netif = netif->next) {
     switch (addr->family) {
       case AF_INET6:
+#if defined(LWIP_IPV6) && LWIP_IPV6
         for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++) {
           if (!ip6_addr_isany(netif_ip6_addr(netif, i))) {
             memcpy(&addr->sin6.sin6_addr, netif_ip6_addr(netif, i), 16);
@@ -37,11 +38,16 @@ int ports_get_host_addr(Address* addr, const char* iface_prefix) {
             break;
           }
         }
+#endif /* LWIP_IPV6 */
         break;
       case AF_INET:
       default:
         if (!ip_addr_isany(&netif->ip_addr)) {
+          #if LWIP_IPV4 && LWIP_IPV6
           memcpy(&addr->sin.sin_addr, &netif->ip_addr.u_addr.ip4, 4);
+#else
+          memcpy(&addr->sin.sin_addr, &netif->ip_addr, 4);
+#endif
           ret = 1;
         }
         break;
