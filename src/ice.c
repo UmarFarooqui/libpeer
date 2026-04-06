@@ -67,40 +67,95 @@ void ice_candidate_to_description(IceCandidate* candidate, char* description, in
   }
 
   addr_to_string(&candidate->addr, addr_string, sizeof(addr_string));
-  snprintf(description, length, "a=candidate:%s %d %s %" PRIu32 " %s %d typ %s\r\n",
+  snprintf(description, length, "a=candidate:%s %d %s %u %s %d typ %s\r\n",
            candidate->foundation,
            candidate->component,
            candidate->transport,
-           candidate->priority,
+           (unsigned int)candidate->priority,
            addr_string,
            candidate->addr.port,
            typ_raddr);
 }
 
 int ice_candidate_from_description(IceCandidate* candidate, char* description, char* end) {
-  char* candidate_start = description;
-  uint32_t port;
+  char* p = description;
   char type[16];
   char addrstring[ADDRSTRLEN];
 
-  if (strncmp("a=", candidate_start, strlen("a=")) == 0) {
-    candidate_start += strlen("a=");
+  if (strncmp("a=", p, 2) == 0) {
+    p += 2;
   }
-  candidate_start += strlen("candidate:");
+  if (strncmp("candidate:", p, 10) == 0) {
+    p += 10;
+  }
 
-  // a=candidate:448736988 1 udp 2122260223 172.17.0.1 49250 typ host generation 0 network-id 1 network-cost 50
-  // a=candidate:udpcandidate 1 udp 120 192.168.1.102 8000 typ host
-  if (sscanf(candidate_start, "%s %d %s %" PRIu32 " %s %" PRIu32 " typ %s",
-             candidate->foundation,
-             &candidate->component,
-             candidate->transport,
-             &candidate->priority,
-             addrstring,
-             &port,
-             type) != 7) {
-    LOGE("Failed to parse ICE candidate description");
-    return -1;
+  // Null-terminate at line boundary
+  char saved = 0;
+  if (end && end > description) {
+    saved = *end;
+    *end = '\0';
   }
+
+  printf("[libpeer] RAW candidate_start: [%s]\n", p);
+
+  // Manual token parsing — sscanf %d is broken on this platform
+  // Format: foundation component transport priority address port typ type ...
+  char* tok;
+  char* saveptr = NULL;
+  char linebuf[256];
+  strncpy(linebuf, p, sizeof(linebuf) - 1);
+  linebuf[sizeof(linebuf) - 1] = '\0';
+
+  // Restore saved char early since we copied to linebuf
+  if (end && end > description) {
+    *end = saved;
+  }
+
+  // Token 1: foundation
+  tok = strtok_r(linebuf, " ", &saveptr);
+  if (!tok) { LOGE("Missing foundation"); return -1; }
+  strncpy(candidate->foundation, tok, 32);
+  candidate->foundation[32] = '\0';
+
+  // Token 2: component
+  tok = strtok_r(NULL, " ", &saveptr);
+  if (!tok) { LOGE("Missing component"); return -1; }
+  candidate->component = (int)strtol(tok, NULL, 10);
+
+  // Token 3: transport
+  tok = strtok_r(NULL, " ", &saveptr);
+  if (!tok) { LOGE("Missing transport"); return -1; }
+  strncpy(candidate->transport, tok, 32);
+  candidate->transport[32] = '\0';
+
+  // Token 4: priority
+  tok = strtok_r(NULL, " ", &saveptr);
+  if (!tok) { LOGE("Missing priority"); return -1; }
+  candidate->priority = (uint32_t)strtol(tok, NULL, 10);
+
+  // Token 5: address
+  tok = strtok_r(NULL, " ", &saveptr);
+  if (!tok) { LOGE("Missing address"); return -1; }
+  strncpy(addrstring, tok, ADDRSTRLEN - 1);
+  addrstring[ADDRSTRLEN - 1] = '\0';
+
+  // Token 6: port
+  tok = strtok_r(NULL, " ", &saveptr);
+  if (!tok) { LOGE("Missing port"); return -1; }
+  int port_int = (int)strtol(tok, NULL, 10);
+
+  // Token 7: "typ"
+  tok = strtok_r(NULL, " ", &saveptr);
+  if (!tok || strncmp(tok, "typ", 3) != 0) { LOGE("Missing typ keyword"); return -1; }
+
+  // Token 8: type (host/srflx/relay)
+  tok = strtok_r(NULL, " ", &saveptr);
+  if (!tok) { LOGE("Missing candidate type"); return -1; }
+  strncpy(type, tok, sizeof(type) - 1);
+  type[sizeof(type) - 1] = '\0';
+
+  printf("[libpeer] Parsed: comp=%d prio=%d addr=%s port=%d type=%s\n",
+         candidate->component, (int)candidate->priority, addrstring, port_int, type);
 
   if (strncmp(candidate->transport, "UDP", 3) != 0 && strncmp(candidate->transport, "udp", 3) != 0) {
     LOGE("Only UDP transport is supported");
@@ -118,16 +173,19 @@ int ice_candidate_from_description(IceCandidate* candidate, char* description, c
     return -1;
   }
 
-  addr_set_port(&candidate->addr, port);
-
+  // Parse address first so family is set, then set port on correct sockaddr
   if (strstr(addrstring, "local") != NULL) {
     if (mdns_resolve_addr(addrstring, &candidate->addr) == 0) {
       LOGW("Failed to resolve mDNS address");
       return -1;
     }
   } else if (addr_from_string(addrstring, &candidate->addr) == 0) {
+    LOGE("Failed to parse address: %s", addrstring);
     return -1;
   }
+
+  addr_set_port(&candidate->addr, (uint16_t)port_int);
+  printf("[libpeer] ICE candidate: addr=%s port=%d prio=%d type=%s\n", addrstring, port_int, (int)candidate->priority, type);
 
   return 0;
 }

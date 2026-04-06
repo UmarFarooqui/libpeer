@@ -10,6 +10,7 @@
 
 #include "base64.h"
 #include "config.h"
+#include "ports.h"
 #include "peer_signaling.h"
 #include "ports.h"
 #include "ssl_transport.h"
@@ -189,6 +190,7 @@ static void peer_signaling_on_pub_event(const char* msg, size_t size) {
     }
 
     if (strcmp(item->valuestring, RPC_METHOD_OFFER) == 0) {
+      printf("[T+%dms] Browser 'offer' RPC received\n", (int)ports_get_epoch_time());
       switch (state) {
         case PEER_CONNECTION_NEW:
         case PEER_CONNECTION_DISCONNECTED:
@@ -202,6 +204,7 @@ static void peer_signaling_on_pub_event(const char* msg, size_t size) {
         } break;
       }
     } else if (strcmp(item->valuestring, RPC_METHOD_ANSWER) == 0) {
+      printf("[T+%dms] Browser 'answer' RPC received\n", (int)ports_get_epoch_time());
       item = cJSON_GetObjectItem(req, "params");
       if (!item && !cJSON_IsString(item)) {
         error = cJSON_CreateRaw(RPC_ERROR_INVALID_PARAMS);

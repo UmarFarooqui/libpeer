@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include "FreeRTOS.h"
+#include "task.h"
 
 #include "agent.h"
 #include "config.h"
@@ -12,6 +14,11 @@
 #include "rtp.h"
 #include "sctp.h"
 #include "sdp.h"
+#include "mbedtls/ssl.h"
+
+#if CONFIG_USE_USRSCTP
+#include "usrsctp.h"
+#endif
 
 #define STATE_CHANGED(pc, curr_state)                                 \
   if (pc->oniceconnectionstatechange && pc->state != curr_state) {    \
@@ -54,7 +61,6 @@ static void peer_connection_outgoing_rtp_packet(uint8_t* data, size_t size, void
 }
 
 static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t len) {
-  int recv_max = 0;
   int ret = -1;
   DtlsSrtp* dtls_srtp = (DtlsSrtp*)ctx;
   PeerConnection* pc = (PeerConnection*)dtls_srtp->user_data;
@@ -64,16 +70,22 @@ static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t 
     return pc->agent_ret;
   }
 
-  while (recv_max < CONFIG_TLS_READ_TIMEOUT && pc->state == PEER_CONNECTION_CONNECTED) {
-    ret = agent_recv(&pc->agent, buf, len);
-
-    if (ret > 0) {
-      break;
+  // Try for ~100ms (100 iterations × 1ms select timeout).
+  // agent_recv returns >0 for DTLS/media, 0 for processed STUN, -1 for nothing.
+  // Return MBEDTLS_ERR_SSL_WANT_READ when no DTLS data arrives so mbedtls
+  // can manage retransmission timing via its internal timer.
+  {
+    int i;
+    for (i = 0; i < 100; i++) {
+      ret = agent_recv(&pc->agent, buf, len);
+      if (ret > 0) {
+        printf("[DTLS-recv] got %d bytes (first byte: 0x%02x)\n", ret, buf[0]);
+        return ret;
+      }
     }
-
-    recv_max++;
   }
-  return ret;
+
+  return MBEDTLS_ERR_SSL_WANT_READ;
 }
 
 static int peer_connection_dtls_srtp_send(void* ctx, const uint8_t* buf, size_t len) {
@@ -293,13 +305,22 @@ int peer_connection_loop(PeerConnection* pc) {
     case PEER_CONNECTION_NEW:
       break;
 
-    case PEER_CONNECTION_CHECKING:
-      if (agent_select_candidate_pair(&pc->agent) < 0) {
+    case PEER_CONNECTION_CHECKING: {
+      static int check_log_count = 0;
+      int sel = agent_select_candidate_pair(&pc->agent);
+      if (sel < 0) {
+        printf("[libpeer] All candidate pairs failed\n");
         STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
       } else if (agent_connectivity_check(&pc->agent) == 0) {
+        printf("[T+%dms] Connectivity check succeeded!\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
         STATE_CHANGED(pc, PEER_CONNECTION_CONNECTED);
+      } else {
+        if (check_log_count++ % 500 == 0) {
+          printf("[libpeer] Checking... (pair conncheck=%d)\n",
+                 pc->agent.nominated_pair ? pc->agent.nominated_pair->conncheck : -1);
+        }
       }
-      break;
+    } break;
 
     case PEER_CONNECTION_CONNECTED:
 
@@ -316,6 +337,13 @@ int peer_connection_loop(PeerConnection* pc) {
       }
       break;
     case PEER_CONNECTION_COMPLETED:
+#if CONFIG_USE_USRSCTP
+      // Pump usrsctp timers — replaces the timer thread that
+      // usrsctp_init() would have created (we use _nothreads).
+      // The main loop runs every ~1ms, so we advance 10ms worth
+      // of ticks to maintain proper SCTP retransmission timing.
+      usrsctp_handle_timers(10);
+#endif
       if ((pc->agent_ret = agent_recv(&pc->agent, pc->agent_buf, sizeof(pc->agent_buf))) > 0) {
         LOGD("agent_recv %d", pc->agent_ret);
 
@@ -415,9 +443,11 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
     return;
   }
 
+  printf("[T+%dms] SDP answer received from browser\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
   agent_set_remote_description(&pc->agent, (char*)sdp);
   if (type == SDP_TYPE_ANSWER) {
     agent_update_candidate_pairs(&pc->agent);
+    printf("[T+%dms] Candidate pairs formed\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
     STATE_CHANGED(pc, PEER_CONNECTION_CHECKING);
   }
 }
@@ -496,10 +526,13 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
   agent_get_local_description(&pc->agent, description, sizeof(pc->temp_buf));
   sdp_append(pc->sdp, description);
 
+  printf("[T+%dms] SDP ready (local_candidates=%d)\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS), pc->agent.local_candidates_count);
+
   if (pc->onicecandidate) {
     pc->onicecandidate(pc->sdp, pc->config.user_data);
   }
 
+  printf("[T+%dms] SDP offer published\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
   return pc->sdp;
 }
 

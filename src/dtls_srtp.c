@@ -1,3 +1,5 @@
+#include "FreeRTOS.h"
+#include "task.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,7 +55,7 @@ static void dtls_srtp_x509_digest(const mbedtls_x509_crt* crt, char* buf) {
   mbedtls_sha256_free(&sha256_ctx);
 
   for (i = 0; i < 32; i++) {
-    snprintf(buf, 4, "%.2X:", digest[i]);
+    snprintf(buf, 4, "%02X:", digest[i]);
     buf += 3;
   }
 
@@ -116,7 +118,7 @@ static int dtls_srtp_selfsign_cert(DtlsSrtp* dtls_srtp) {
   mbedtls_mpi_fill_random(&serial, 16, mbedtls_ctr_drbg_random, &dtls_srtp->ctr_drbg);
   ret = mbedtls_x509write_crt_set_serial(&crt, &serial);
   if (ret < 0) {
-    LOGE("mbedtls_x509write_crt_set_serial failed -0x%.4x", (unsigned int)-ret);
+    LOGE("mbedtls_x509write_crt_set_serial failed -0x%04x", (unsigned int)-ret);
   }
 #else
   mbedtls_x509write_crt_set_serial_raw(&crt, (unsigned char*)serial, strlen(serial));
@@ -127,7 +129,7 @@ static int dtls_srtp_selfsign_cert(DtlsSrtp* dtls_srtp) {
   ret = mbedtls_x509write_crt_pem(&crt, cert_buf, 2 * RSA_KEY_LENGTH, mbedtls_ctr_drbg_random, &dtls_srtp->ctr_drbg);
 
   if (ret < 0) {
-    LOGE("mbedtls_x509write_crt_pem failed -0x%.4x", (unsigned int)-ret);
+    LOGE("mbedtls_x509write_crt_pem failed -0x%04x", (unsigned int)-ret);
   }
 
   mbedtls_x509_crt_parse(&dtls_srtp->cert, cert_buf, 2 * RSA_KEY_LENGTH);
@@ -182,8 +184,8 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
 
   mbedtls_ssl_conf_rng(&dtls_srtp->conf, mbedtls_ctr_drbg_random, &dtls_srtp->ctr_drbg);
 
-  mbedtls_ssl_conf_read_timeout(&dtls_srtp->conf, 1000);
-
+  // NOTE: config_defaults MUST be called BEFORE any other conf_ calls
+  // because it resets ALL config values to defaults.
   if (dtls_srtp->role == DTLS_SRTP_ROLE_SERVER) {
     mbedtls_ssl_config_defaults(&dtls_srtp->conf,
                                 MBEDTLS_SSL_IS_SERVER,
@@ -202,6 +204,11 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
                                 MBEDTLS_SSL_TRANSPORT_DATAGRAM,
                                 MBEDTLS_SSL_PRESET_DEFAULT);
   }
+
+  // These MUST come AFTER config_defaults:
+  mbedtls_ssl_conf_read_timeout(&dtls_srtp->conf, 1000);
+  // Give browser time to start DTLS: min 5s initial, max 30s total
+  mbedtls_ssl_conf_handshake_timeout(&dtls_srtp->conf, 5000, 30000);
 
   dtls_srtp_x509_digest(&dtls_srtp->cert, dtls_srtp->local_fingerprint);
 
@@ -366,12 +373,40 @@ static void dtls_srtp_key_derivation_cb(void* context,
 #endif
 }
 
+/*
+ * FreeRTOS-based DTLS timer.  mbedtls_timing_set_delay / get_delay use
+ * gettimeofday which may not work on all RTOS ports.  We use
+ * xTaskGetTickCount instead for reliable millisecond timing.
+ */
+typedef struct {
+  TickType_t start;
+  uint32_t int_ms;   /* intermediate delay (retransmit) */
+  uint32_t fin_ms;   /* final delay (timeout) */
+} FreertosDtlsTimer;
+
+static void freertos_dtls_set_delay(void *data, uint32_t int_ms, uint32_t fin_ms) {
+  FreertosDtlsTimer *t = (FreertosDtlsTimer *)data;
+  t->int_ms = int_ms;
+  t->fin_ms = fin_ms;
+  if (fin_ms != 0)
+    t->start = xTaskGetTickCount();
+}
+
+static int freertos_dtls_get_delay(void *data) {
+  FreertosDtlsTimer *t = (FreertosDtlsTimer *)data;
+  if (t->fin_ms == 0) return -1;  /* cancelled */
+  uint32_t elapsed = (uint32_t)((xTaskGetTickCount() - t->start) * portTICK_PERIOD_MS);
+  if (elapsed >= t->fin_ms) return 2;  /* final delay expired */
+  if (elapsed >= t->int_ms) return 1;  /* intermediate delay expired */
+  return 0;
+}
+
 static int dtls_srtp_do_handshake(DtlsSrtp* dtls_srtp) {
   int ret;
 
-  static mbedtls_timing_delay_context timer;
+  static FreertosDtlsTimer timer;
 
-  mbedtls_ssl_set_timer_cb(&dtls_srtp->ssl, &timer, mbedtls_timing_set_delay, mbedtls_timing_get_delay);
+  mbedtls_ssl_set_timer_cb(&dtls_srtp->ssl, &timer, freertos_dtls_set_delay, freertos_dtls_get_delay);
 
 #if CONFIG_MBEDTLS_2_X
   mbedtls_ssl_conf_export_keys_ext_cb(&dtls_srtp->conf, dtls_srtp_key_derivation_cb, dtls_srtp);
@@ -391,6 +426,7 @@ static int dtls_srtp_do_handshake(DtlsSrtp* dtls_srtp) {
 
 static int dtls_srtp_handshake_server(DtlsSrtp* dtls_srtp) {
   int ret;
+  int attempt = 0;
 
   while (1) {
     unsigned char client_ip[] = "test";
@@ -399,13 +435,21 @@ static int dtls_srtp_handshake_server(DtlsSrtp* dtls_srtp) {
 
     mbedtls_ssl_set_client_transport_id(&dtls_srtp->ssl, client_ip, sizeof(client_ip));
 
+    attempt++;
+    printf("[T+%dms] DTLS handshake attempt #%d (free heap: %d)\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS), attempt, xPortGetFreeHeapSize());
     ret = dtls_srtp_do_handshake(dtls_srtp);
+    printf("[libpeer] DTLS handshake ret: -0x%04x\n", (unsigned int)-ret);
 
     if (ret == MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED) {
-      LOGD("DTLS hello verification requested");
+      printf("[libpeer] DTLS hello verification requested (cookie exchange)\n");
+
+    } else if (ret == MBEDTLS_ERR_SSL_TIMEOUT && attempt < 3) {
+      // Timeout waiting for ClientHello — browser may not have started
+      // DTLS yet.  Retry with a fresh session.
+      printf("[libpeer] DTLS timeout, retrying...\n");
 
     } else if (ret != 0) {
-      LOGE("failed! mbedtls_ssl_handshake returned -0x%.4x", (unsigned int)-ret);
+      LOGE("failed! mbedtls_ssl_handshake returned -0x%04x", (unsigned int)-ret);
 
       break;
 
@@ -424,7 +468,7 @@ static int dtls_srtp_handshake_client(DtlsSrtp* dtls_srtp) {
 
   ret = dtls_srtp_do_handshake(dtls_srtp);
   if (ret != 0) {
-    LOGE("failed! mbedtls_ssl_handshake returned -0x%.4x\n\n", (unsigned int)-ret);
+    LOGE("failed! mbedtls_ssl_handshake returned -0x%04x\n\n", (unsigned int)-ret);
   }
 
   LOGD("DTLS client handshake done");

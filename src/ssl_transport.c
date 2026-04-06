@@ -7,10 +7,18 @@
 #include "mbedtls/debug.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ssl.h"
+#if defined(MBEDTLS_PSA_CRYPTO_C)
+#include "psa/crypto.h"
+#endif
 
 #include <sys/select.h>
 #include "config.h"
 #include "ports.h"
+
+#if CONFIG_USE_LWIP
+#include "FreeRTOS.h"
+extern size_t xPortGetFreeHeapSize(void);
+#endif
 #include "ssl_transport.h"
 #include "utils.h"
 
@@ -50,6 +58,10 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
   int ret;
   Address resolved_addr;
 
+#if defined(MBEDTLS_PSA_CRYPTO_C)
+  psa_crypto_init();
+#endif
+
   mbedtls_ssl_init(&net_ctx->ssl);
   mbedtls_ssl_config_init(&net_ctx->conf);
   // mbedtls_x509_crt_init(&net_ctx->cacert);
@@ -58,7 +70,8 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
 
   if ((ret = mbedtls_ctr_drbg_seed(&net_ctx->ctr_drbg, mbedtls_entropy_func, &net_ctx->entropy,
                                    (const unsigned char*)pers, strlen(pers))) != 0) {
-    return -1;
+    LOGE("ssl ctr_drbg_seed error: -0x%x", (unsigned int)-ret);
+    goto fail;
   }
 
   if ((ret = mbedtls_ssl_config_defaults(&net_ctx->conf,
@@ -66,10 +79,10 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
                                          MBEDTLS_SSL_TRANSPORT_STREAM,
                                          MBEDTLS_SSL_PRESET_DEFAULT)) != 0) {
     LOGE("ssl config error: -0x%x", (unsigned int)-ret);
-    return -1;
+    goto fail;
   }
 
-  mbedtls_ssl_conf_authmode(&net_ctx->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+  mbedtls_ssl_conf_authmode(&net_ctx->conf, MBEDTLS_SSL_VERIFY_NONE);
   /*
   XXX: not sure if this is needed
   ret = mbedtls_x509_crt_parse(&net_ctx->cacert, (const unsigned char *) cacert, strlen(cacert) + 1);
@@ -83,36 +96,52 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
 
   if ((ret = mbedtls_ssl_setup(&net_ctx->ssl, &net_ctx->conf)) != 0) {
     LOGE("ssl setup error: -0x%x", (unsigned int)-ret);
-    return -1;
+    goto fail;
   }
 
   if ((ret = mbedtls_ssl_set_hostname(&net_ctx->ssl, host)) != 0) {
     LOGE("ssl set hostname error: -0x%x", (unsigned int)-ret);
-    return -1;
+    goto fail;
   }
 
   memset(&resolved_addr, 0, sizeof(resolved_addr));
   tcp_socket_open(&net_ctx->tcp_socket, AF_INET);
   ports_resolve_addr(host, &resolved_addr);
   addr_set_port(&resolved_addr, port);
-  if ((ret = tcp_socket_connect(&net_ctx->tcp_socket, &resolved_addr) < 0)) {
-    return -1;
+  LOGI("connecting to %s:%d", host, port);
+  if ((ret = tcp_socket_connect(&net_ctx->tcp_socket, &resolved_addr)) < 0) {
+    LOGE("tcp connect failed: %d", ret);
+    tcp_socket_close(&net_ctx->tcp_socket);
+    goto fail;
   }
 
   mbedtls_ssl_conf_read_timeout(&net_ctx->conf, CONFIG_TLS_READ_TIMEOUT);
   mbedtls_ssl_set_bio(&net_ctx->ssl, &net_ctx->tcp_socket,
                       ssl_transport_mbedlts_send, NULL, ssl_transport_mbedtls_recv_timeout);
 
-  LOGI("start to handshake");
+  LOGI("start to handshake (free heap: %d)", xPortGetFreeHeapSize());
 
   while ((ret = mbedtls_ssl_handshake(&net_ctx->ssl)) != 0) {
     if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-      LOGE("ssl handshake error: -0x%x", (unsigned int)-ret);
+      LOGE("ssl handshake error: -0x%x (high=-0x%x low=-0x%x)", (unsigned int)-ret, (unsigned int)((-ret) & 0xFF80), (unsigned int)((-ret) & 0x007F));
+#if defined(MBEDTLS_SSL_TLS1_3_COMPATIBILITY_MODE) || 1
+      if (net_ctx->ssl.state != 0)
+        LOGE("  handshake state=%d", net_ctx->ssl.state);
+#endif
+      tcp_socket_close(&net_ctx->tcp_socket);
+      goto fail;
     }
   }
 
   LOGI("handshake success");
   return 0;
+
+fail:
+  mbedtls_ssl_free(&net_ctx->ssl);
+  mbedtls_ssl_config_free(&net_ctx->conf);
+  mbedtls_ctr_drbg_free(&net_ctx->ctr_drbg);
+  mbedtls_entropy_free(&net_ctx->entropy);
+  return -1;
 }
 
 void ssl_transport_disconnect(NetworkContext_t* net_ctx) {
@@ -140,7 +169,8 @@ int32_t ssl_transport_send(NetworkContext_t* net_ctx, const void* buf, size_t le
   const int max_retry = 5;
   while ((ret = mbedtls_ssl_write(&net_ctx->ssl, buf, len)) <= 0) {
     if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-      LOGE("ssl write error: -0x%x", (unsigned int)-ret);
+      LOGE("ssl write error: -0x%x (len=%d)", (unsigned int)-ret, (int)len);
+      return -1;
     }
 
     if (++retry_count >= max_retry) {

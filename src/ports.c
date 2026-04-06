@@ -7,6 +7,8 @@
 #include "config.h"
 
 #if CONFIG_USE_LWIP
+#include "FreeRTOS.h"
+#include "task.h"
 #include "lwip/ip_addr.h"
 #include "lwip/netdb.h"
 #include "lwip/netif.h"
@@ -27,7 +29,9 @@ int ports_get_host_addr(Address* addr, const char* iface_prefix) {
 #if CONFIG_USE_LWIP
   struct netif* netif;
   int i;
-  for (netif = netif_list; netif != NULL; netif = netif->next) {
+  struct netif* target = netif_default ? netif_default : netif_list;
+  printf("[libpeer] ports_get_host_addr: using %s netif\n", netif_default ? "default" : "list");
+  for (netif = target; netif != NULL; netif = netif->next) {
     switch (addr->family) {
       case AF_INET6:
 #if defined(LWIP_IPV6) && LWIP_IPV6
@@ -149,9 +153,13 @@ int ports_resolve_addr(const char* host, Address* addr) {
 }
 
 uint32_t ports_get_epoch_time() {
+#if CONFIG_USE_LWIP
+  return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+#else
   struct timeval tv;
   gettimeofday(&tv, NULL);
   return (uint32_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+#endif
 }
 
 void ports_sleep_ms(int ms) {

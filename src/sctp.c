@@ -492,7 +492,10 @@ static int sctp_incoming_data_cb(struct socket* sock, union sctp_sockstore addr,
 
 void sctp_usrsctp_init() {
 #if CONFIG_USE_USRSCTP
-  usrsctp_init(0, sctp_outgoing_data_cb, NULL);
+  // Use nothreads variant — FreeRTOS doesn't support pthread_create.
+  // Timer ticks are pumped manually via usrsctp_handle_timers() in
+  // peer_connection_loop.
+  usrsctp_init_nothreads(0, sctp_outgoing_data_cb, NULL);
 #endif
 }
 
@@ -575,6 +578,9 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
 
     struct sockaddr_conn sconn;
     memset(&sconn, 0, sizeof(sconn));
+#ifdef HAVE_SA_LEN
+    sconn.sconn_len = sizeof(sconn);
+#endif
     sconn.sconn_family = AF_CONN;
     sconn.sconn_port = htons(sctp->local_port);
     sconn.sconn_addr = (void*)sctp;
@@ -583,12 +589,18 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
     struct sockaddr_conn rconn;
 
     memset(&rconn, 0, sizeof(struct sockaddr_conn));
+#ifdef HAVE_SA_LEN
+    rconn.sconn_len = sizeof(rconn);
+#endif
     rconn.sconn_family = AF_CONN;
     rconn.sconn_port = htons(sctp->remote_port);
     rconn.sconn_addr = (void*)sctp;
     ret = usrsctp_connect(sock, (struct sockaddr*)&rconn, sizeof(struct sockaddr_conn));
 
-    if (ret < 0 && errno != EINPROGRESS) {
+    printf("[libpeer] usrsctp_connect ret=%d errno=%d (EINPROGRESS=%d)\n", ret, errno, EINPROGRESS);
+    // Accept both newlib EINPROGRESS (119) and Linux EINPROGRESS (115)
+    // — usrsctp internally uses Linux errno values on some platforms.
+    if (ret < 0 && errno != EINPROGRESS && errno != 115) {
       LOGE("connect error");
       break;
     }

@@ -229,7 +229,7 @@ int tcp_socket_connect(TcpSocket* tcp_socket, Address* addr) {
   addr_to_string(addr, addr_string, sizeof(addr_string));
   LOGI("Connecting to server: %s:%d", addr_string, addr->port);
   if ((ret = connect(tcp_socket->fd, sa, sock_len)) < 0) {
-    LOGE("Failed to connect to server");
+    LOGE("Failed to connect: ret=%d, errno=%d (%s)", ret, errno, strerror(errno));
     return -1;
   }
 
