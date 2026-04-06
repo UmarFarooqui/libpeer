@@ -2,8 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include "FreeRTOS.h"
-#include "task.h"
 
 #include "agent.h"
 #include "config.h"
@@ -312,7 +310,7 @@ int peer_connection_loop(PeerConnection* pc) {
         printf("[libpeer] All candidate pairs failed\n");
         STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
       } else if (agent_connectivity_check(&pc->agent) == 0) {
-        printf("[T+%dms] Connectivity check succeeded!\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+        printf("[T+%dms] Connectivity check succeeded!\n", (int)ports_get_epoch_time());
         STATE_CHANGED(pc, PEER_CONNECTION_CONNECTED);
       } else {
         if (check_log_count++ % 500 == 0) {
@@ -443,11 +441,11 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
     return;
   }
 
-  printf("[T+%dms] SDP answer received from browser\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+  printf("[T+%dms] SDP answer received from browser\n", (int)ports_get_epoch_time());
   agent_set_remote_description(&pc->agent, (char*)sdp);
   if (type == SDP_TYPE_ANSWER) {
     agent_update_candidate_pairs(&pc->agent);
-    printf("[T+%dms] Candidate pairs formed\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+    printf("[T+%dms] Candidate pairs formed\n", (int)ports_get_epoch_time());
     STATE_CHANGED(pc, PEER_CONNECTION_CHECKING);
   }
 }
@@ -526,13 +524,13 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
   agent_get_local_description(&pc->agent, description, sizeof(pc->temp_buf));
   sdp_append(pc->sdp, description);
 
-  printf("[T+%dms] SDP ready (local_candidates=%d)\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS), pc->agent.local_candidates_count);
+  printf("[T+%dms] SDP ready (local_candidates=%d)\n", (int)ports_get_epoch_time(), pc->agent.local_candidates_count);
 
   if (pc->onicecandidate) {
     pc->onicecandidate(pc->sdp, pc->config.user_data);
   }
 
-  printf("[T+%dms] SDP offer published\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+  printf("[T+%dms] SDP offer published\n", (int)ports_get_epoch_time());
   return pc->sdp;
 }
 

@@ -3,8 +3,6 @@
 #include <string.h>
 #include <sys/select.h>
 #include <unistd.h>
-#include "FreeRTOS.h"
-#include "task.h"
 
 #include "agent.h"
 #include "base64.h"
@@ -144,7 +142,7 @@ static int agent_create_host_addr(Agent* agent) {
       if (ports_get_host_addr(&ice_candidate->addr, iface_prefx[j])) {
         char dbg_addr[46];
         addr_to_string(&ice_candidate->addr, dbg_addr, sizeof(dbg_addr));
-        printf("[T+%dms] Host candidate: %s:%d\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS), dbg_addr, ice_candidate->addr.port);
+        printf("[T+%dms] Host candidate: %s:%d\n", (int)ports_get_epoch_time(), dbg_addr, ice_candidate->addr.port);
         agent->local_candidates_count++;
       }
     }
@@ -270,22 +268,22 @@ void agent_gather_candidate(Agent* agent, const char* urls, const char* username
   snprintf(hostname, pos - urls - 5 + 1, "%s", urls + 5);
 
   for (i = 0; i < sizeof(addr_type) / sizeof(addr_type[0]); i++) {
-    printf("[T+%dms] DNS resolve start: %s\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS), hostname);
+    printf("[T+%dms] DNS resolve start: %s\n", (int)ports_get_epoch_time(), hostname);
     if (ports_resolve_addr(hostname, &resolved_addr) == 0) {
       addr_set_port(&resolved_addr, port);
       addr_to_string(&resolved_addr, addr_string, sizeof(addr_string));
-      printf("[T+%dms] DNS resolve done: %s -> %s\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS), hostname, addr_string);
+      printf("[T+%dms] DNS resolve done: %s -> %s\n", (int)ports_get_epoch_time(), hostname, addr_string);
 
       if (strncmp(urls, "stun:", 5) == 0) {
-        printf("[T+%dms] STUN binding request start\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+        printf("[T+%dms] STUN binding request start\n", (int)ports_get_epoch_time());
         agent_create_stun_addr(agent, &resolved_addr);
-        printf("[T+%dms] STUN binding request done (local_candidates=%d)\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS), agent->local_candidates_count);
+        printf("[T+%dms] STUN binding request done (local_candidates=%d)\n", (int)ports_get_epoch_time(), agent->local_candidates_count);
       } else if (strncmp(urls, "turn:", 5) == 0) {
         LOGD("Create turn addr");
         agent_create_turn_addr(agent, &resolved_addr, username, credential);
       }
     } else {
-      printf("[T+%dms] DNS resolve FAILED: %s\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS), hostname);
+      printf("[T+%dms] DNS resolve FAILED: %s\n", (int)ports_get_epoch_time(), hostname);
     }
   }
 }
@@ -517,7 +515,7 @@ int agent_connectivity_check(Agent* agent) {
 
   if (agent->nominated_pair->conncheck % AGENT_CONNCHECK_PERIOD == 0) {
     addr_to_string(&agent->nominated_pair->remote->addr, addr_string, sizeof(addr_string));
-    printf("[T+%dms] STUN req -> %s:%d (check %d)\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS), addr_string,
+    printf("[T+%dms] STUN req -> %s:%d (check %d)\n", (int)ports_get_epoch_time(), addr_string,
            agent->nominated_pair->remote->addr.port,
            agent->nominated_pair->conncheck);
     agent_create_binding_request(agent, &msg);

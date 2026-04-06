@@ -1,5 +1,3 @@
-#include "FreeRTOS.h"
-#include "task.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -374,39 +372,18 @@ static void dtls_srtp_key_derivation_cb(void* context,
 }
 
 /*
- * FreeRTOS-based DTLS timer.  mbedtls_timing_set_delay / get_delay use
- * gettimeofday which may not work on all RTOS ports.  We use
- * xTaskGetTickCount instead for reliable millisecond timing.
+ * DTLS timer via Platform Abstraction Layer.
+ * Each platform implements ports_dtls_timer_set / ports_dtls_timer_get
+ * with appropriate timing primitives (FreeRTOS ticks, gettimeofday, etc.).
  */
-typedef struct {
-  TickType_t start;
-  uint32_t int_ms;   /* intermediate delay (retransmit) */
-  uint32_t fin_ms;   /* final delay (timeout) */
-} FreertosDtlsTimer;
-
-static void freertos_dtls_set_delay(void *data, uint32_t int_ms, uint32_t fin_ms) {
-  FreertosDtlsTimer *t = (FreertosDtlsTimer *)data;
-  t->int_ms = int_ms;
-  t->fin_ms = fin_ms;
-  if (fin_ms != 0)
-    t->start = xTaskGetTickCount();
-}
-
-static int freertos_dtls_get_delay(void *data) {
-  FreertosDtlsTimer *t = (FreertosDtlsTimer *)data;
-  if (t->fin_ms == 0) return -1;  /* cancelled */
-  uint32_t elapsed = (uint32_t)((xTaskGetTickCount() - t->start) * portTICK_PERIOD_MS);
-  if (elapsed >= t->fin_ms) return 2;  /* final delay expired */
-  if (elapsed >= t->int_ms) return 1;  /* intermediate delay expired */
-  return 0;
-}
 
 static int dtls_srtp_do_handshake(DtlsSrtp* dtls_srtp) {
   int ret;
 
-  static FreertosDtlsTimer timer;
+  static PortsDtlsTimer* timer = NULL;
+  if (!timer) timer = ports_dtls_timer_alloc();
 
-  mbedtls_ssl_set_timer_cb(&dtls_srtp->ssl, &timer, freertos_dtls_set_delay, freertos_dtls_get_delay);
+  mbedtls_ssl_set_timer_cb(&dtls_srtp->ssl, timer, ports_dtls_timer_set, ports_dtls_timer_get);
 
 #if CONFIG_MBEDTLS_2_X
   mbedtls_ssl_conf_export_keys_ext_cb(&dtls_srtp->conf, dtls_srtp_key_derivation_cb, dtls_srtp);
@@ -436,7 +413,7 @@ static int dtls_srtp_handshake_server(DtlsSrtp* dtls_srtp) {
     mbedtls_ssl_set_client_transport_id(&dtls_srtp->ssl, client_ip, sizeof(client_ip));
 
     attempt++;
-    printf("[T+%dms] DTLS handshake attempt #%d (free heap: %d)\n", (int)(xTaskGetTickCount() * portTICK_PERIOD_MS), attempt, xPortGetFreeHeapSize());
+    printf("[T+%dms] DTLS handshake attempt #%d (free heap: %d)\n", (int)ports_get_epoch_time(), attempt, (int)ports_get_free_heap());
     ret = dtls_srtp_do_handshake(dtls_srtp);
     printf("[libpeer] DTLS handshake ret: -0x%04x\n", (unsigned int)-ret);
 

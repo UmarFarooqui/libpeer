@@ -7,18 +7,10 @@
 #include "mbedtls/debug.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ssl.h"
-#if defined(MBEDTLS_PSA_CRYPTO_C)
-#include "psa/crypto.h"
-#endif
 
 #include <sys/select.h>
 #include "config.h"
 #include "ports.h"
-
-#if CONFIG_USE_LWIP
-#include "FreeRTOS.h"
-extern size_t xPortGetFreeHeapSize(void);
-#endif
 #include "ssl_transport.h"
 #include "utils.h"
 
@@ -58,9 +50,7 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
   int ret;
   Address resolved_addr;
 
-#if defined(MBEDTLS_PSA_CRYPTO_C)
-  psa_crypto_init();
-#endif
+  ports_crypto_init();
 
   mbedtls_ssl_init(&net_ctx->ssl);
   mbedtls_ssl_config_init(&net_ctx->conf);
@@ -119,7 +109,7 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
   mbedtls_ssl_set_bio(&net_ctx->ssl, &net_ctx->tcp_socket,
                       ssl_transport_mbedlts_send, NULL, ssl_transport_mbedtls_recv_timeout);
 
-  LOGI("start to handshake (free heap: %d)", xPortGetFreeHeapSize());
+  LOGI("start to handshake (free heap: %d)", (int)ports_get_free_heap());
 
   while ((ret = mbedtls_ssl_handshake(&net_ctx->ssl)) != 0) {
     if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {

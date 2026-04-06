@@ -12,7 +12,6 @@
 #include "config.h"
 #include "ports.h"
 #include "peer_signaling.h"
-#include "ports.h"
 #include "ssl_transport.h"
 #include "utils.h"
 
