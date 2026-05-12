@@ -385,10 +385,13 @@ int agent_recv(Agent* agent, uint8_t* buf, int len) {
     stun_msg.size = ret;
     stun_parse_msg_buf(&stun_msg);
     switch (stun_msg.stunclass) {
-      case STUN_CLASS_REQUEST:
-        printf("[libpeer] STUN request from remote\n");
+      case STUN_CLASS_REQUEST: {
+        static int stun_req_count = 0;
+        if (stun_req_count++ == 0) {
+          printf("[libpeer] STUN request from remote\n");
+        }
         agent_process_stun_request(agent, &stun_msg, &addr);
-        break;
+      } break;
       case STUN_CLASS_RESPONSE:
         printf("[libpeer] STUN response received!\n");
         agent_process_stun_response(agent, &stun_msg);

@@ -17,7 +17,7 @@
 #define DEBUG_TAG "DEBUG"
 
 #ifndef LOG_LEVEL
-#define LOG_LEVEL LEVEL_INFO
+#define LOG_LEVEL LEVEL_WARN
 #endif
 
 #if LOG_REDIRECT
@@ -26,7 +26,7 @@ void peer_log(char* level_tag, const char* file_name, int line_number, const cha
   peer_log(level_tag, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #else
 #define LOG_PRINT(level_tag, fmt, ...) \
-  fprintf(stdout, "%s\t%s\t%d\t" fmt "\n", level_tag, __FILE__, __LINE__, ##__VA_ARGS__)
+  printf("[libpeer] " fmt "\n", ##__VA_ARGS__)
 #endif
 
 #if LOG_LEVEL >= LEVEL_DEBUG

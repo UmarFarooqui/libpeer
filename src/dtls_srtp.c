@@ -141,7 +141,7 @@ static int dtls_srtp_selfsign_cert(DtlsSrtp* dtls_srtp) {
 
 #if CONFIG_MBEDTLS_DEBUG
 static void dtls_srtp_debug(void* ctx, int level, const char* file, int line, const char* str) {
-  LOGD("%s:%04d: %s", file, line, str);
+  printf("[mbedtls %d] %s:%04d: %s", level, file, line, str);
 }
 #endif
 
@@ -166,21 +166,7 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
   mbedtls_pk_init(&dtls_srtp->pkey);
   mbedtls_entropy_init(&dtls_srtp->entropy);
   mbedtls_ctr_drbg_init(&dtls_srtp->ctr_drbg);
-#if CONFIG_MBEDTLS_DEBUG
-  mbedtls_debug_set_threshold(3);
-  mbedtls_ssl_conf_dbg(&dtls_srtp->conf, dtls_srtp_debug, NULL);
-#endif
   dtls_srtp_selfsign_cert(dtls_srtp);
-
-  mbedtls_ssl_conf_verify(&dtls_srtp->conf, dtls_srtp_cert_verify, NULL);
-
-  mbedtls_ssl_conf_authmode(&dtls_srtp->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
-
-  mbedtls_ssl_conf_ca_chain(&dtls_srtp->conf, &dtls_srtp->cert, NULL);
-
-  mbedtls_ssl_conf_own_cert(&dtls_srtp->conf, &dtls_srtp->cert, &dtls_srtp->pkey);
-
-  mbedtls_ssl_conf_rng(&dtls_srtp->conf, mbedtls_ctr_drbg_random, &dtls_srtp->ctr_drbg);
 
   // NOTE: config_defaults MUST be called BEFORE any other conf_ calls
   // because it resets ALL config values to defaults.
@@ -190,11 +176,8 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
                                 MBEDTLS_SSL_TRANSPORT_DATAGRAM,
                                 MBEDTLS_SSL_PRESET_DEFAULT);
 
-    mbedtls_ssl_cookie_init(&dtls_srtp->cookie_ctx);
-
-    mbedtls_ssl_cookie_setup(&dtls_srtp->cookie_ctx, mbedtls_ctr_drbg_random, &dtls_srtp->ctr_drbg);
-
-    mbedtls_ssl_conf_dtls_cookies(&dtls_srtp->conf, mbedtls_ssl_cookie_write, mbedtls_ssl_cookie_check, &dtls_srtp->cookie_ctx);
+    // Disable DTLS cookies for WebRTC (ICE already authenticates peers)
+    mbedtls_ssl_conf_dtls_cookies(&dtls_srtp->conf, NULL, NULL, NULL);
 
   } else {
     mbedtls_ssl_config_defaults(&dtls_srtp->conf,
@@ -203,7 +186,18 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
                                 MBEDTLS_SSL_PRESET_DEFAULT);
   }
 
-  // These MUST come AFTER config_defaults:
+  // All conf_ calls MUST come AFTER config_defaults:
+  mbedtls_ssl_conf_verify(&dtls_srtp->conf, dtls_srtp_cert_verify, NULL);
+  mbedtls_ssl_conf_authmode(&dtls_srtp->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+  mbedtls_ssl_conf_ca_chain(&dtls_srtp->conf, &dtls_srtp->cert, NULL);
+  mbedtls_ssl_conf_own_cert(&dtls_srtp->conf, &dtls_srtp->cert, &dtls_srtp->pkey);
+  mbedtls_ssl_conf_rng(&dtls_srtp->conf, mbedtls_ctr_drbg_random, &dtls_srtp->ctr_drbg);
+
+#if CONFIG_MBEDTLS_DEBUG
+  mbedtls_debug_set_threshold(4);
+  mbedtls_ssl_conf_dbg(&dtls_srtp->conf, dtls_srtp_debug, NULL);
+#endif
+
   mbedtls_ssl_conf_read_timeout(&dtls_srtp->conf, 1000);
   // Give browser time to start DTLS: min 5s initial, max 30s total
   mbedtls_ssl_conf_handshake_timeout(&dtls_srtp->conf, 5000, 30000);
@@ -279,7 +273,7 @@ static int dtls_srtp_key_derivation(DtlsSrtp* dtls_srtp, const unsigned char* ma
   const uint8_t* server_key = client_key + SRTP_MASTER_KEY_LENGTH;
   const uint8_t* client_salt = server_key + SRTP_MASTER_KEY_LENGTH;
   const uint8_t* server_salt = client_salt + SRTP_MASTER_SALT_LENGTH;
-  uint8_t *local_key, *remote_key, *local_salt, *remote_salt;
+  const uint8_t *local_key, *remote_key, *local_salt, *remote_salt;
   if (dtls_srtp->role == DTLS_SRTP_ROLE_SERVER) {
     local_key = server_key;
     local_salt = server_salt;
@@ -418,11 +412,9 @@ static int dtls_srtp_handshake_server(DtlsSrtp* dtls_srtp) {
     printf("[libpeer] DTLS handshake ret: -0x%04x\n", (unsigned int)-ret);
 
     if (ret == MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED) {
-      printf("[libpeer] DTLS hello verification requested (cookie exchange)\n");
+      printf("[libpeer] DTLS hello verification requested\n");
 
     } else if (ret == MBEDTLS_ERR_SSL_TIMEOUT && attempt < 3) {
-      // Timeout waiting for ClientHello — browser may not have started
-      // DTLS yet.  Retry with a fresh session.
       printf("[libpeer] DTLS timeout, retrying...\n");
 
     } else if (ret != 0) {

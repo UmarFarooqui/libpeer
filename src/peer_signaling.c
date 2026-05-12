@@ -16,7 +16,7 @@
 #include "utils.h"
 
 #define KEEP_ALIVE_TIMEOUT_SECONDS 60
-#define CONNACK_RECV_TIMEOUT_MS 1000
+#define CONNACK_RECV_TIMEOUT_MS 5000
 
 #define PATH_MAX_LEN 128
 #define HOST_MAX_LEN 64

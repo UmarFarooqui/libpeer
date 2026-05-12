@@ -114,10 +114,6 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
   while ((ret = mbedtls_ssl_handshake(&net_ctx->ssl)) != 0) {
     if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
       LOGE("ssl handshake error: -0x%x (high=-0x%x low=-0x%x)", (unsigned int)-ret, (unsigned int)((-ret) & 0xFF80), (unsigned int)((-ret) & 0x007F));
-#if defined(MBEDTLS_SSL_TLS1_3_COMPATIBILITY_MODE) || 1
-      if (net_ctx->ssl.state != 0)
-        LOGE("  handshake state=%d", net_ctx->ssl.state);
-#endif
       tcp_socket_close(&net_ctx->tcp_socket);
       goto fail;
     }
@@ -148,6 +144,10 @@ int32_t ssl_transport_recv(NetworkContext_t* net_ctx, void* buf, size_t len) {
   int ret;
   memset(buf, 0, len);
   ret = mbedtls_ssl_read(&net_ctx->ssl, buf, len);
+
+  if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_TIMEOUT) {
+    return 0;
+  }
 
   return ret;
 }
