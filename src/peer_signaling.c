@@ -411,7 +411,7 @@ static int peer_signaling_mqtt_connect(const char* hostname, int port) {
 
   memset(&conn_info, 0, sizeof(conn_info));
 
-  conn_info.cleanSession = false;
+  conn_info.cleanSession = true;
 
   if (strlen(g_ps.token) > 0) {
     peer_signaling_resolve_token(g_ps.token, username, password);

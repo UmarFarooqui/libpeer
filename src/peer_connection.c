@@ -418,9 +418,9 @@ int peer_connection_loop(PeerConnection* pc) {
 #if CONFIG_USE_USRSCTP
       // Pump usrsctp timers — replaces the timer thread that
       // usrsctp_init() would have created (we use _nothreads).
-      // The main loop runs every ~1ms, so we advance 10ms worth
-      // of ticks to maintain proper SCTP retransmission timing.
-      usrsctp_handle_timers(10);
+      // The main loop runs every ~1ms via vTaskDelay(1), so advance
+      // by 1ms to keep SCTP timers in sync with real time.
+      usrsctp_handle_timers(1);
 #endif
       if ((pc->agent_ret = agent_recv(&pc->agent, pc->agent_buf, sizeof(pc->agent_buf))) > 0) {
         LOGD("agent_recv %d", pc->agent_ret);

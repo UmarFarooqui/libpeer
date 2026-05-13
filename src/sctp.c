@@ -81,10 +81,12 @@ uint32_t crc32c(uint32_t crc, const uint8_t* data, unsigned int length) {
   return crc ^ 0xffffffff;
 }
 
+#if !CONFIG_USE_USRSCTP
 static uint32_t sctp_get_checksum(Sctp* sctp, const uint8_t* buf, size_t len) {
   uint32_t crc = crc32c(0xffffffff, buf, len);
   return crc;
 }
+#endif
 
 static int sctp_outgoing_data_cb(void* userdata, void* buf, size_t len, uint8_t tos, uint8_t set_df) {
   Sctp* sctp = (Sctp*)userdata;
@@ -474,18 +476,12 @@ static void sctp_process_notification(Sctp* sctp, union sctp_notification* notif
 
 static int sctp_incoming_data_cb(struct socket* sock, union sctp_sockstore addr, void* data, size_t len, struct sctp_rcvinfo recv_info, int flags, void* userdata) {
   Sctp* sctp = (Sctp*)userdata;
-  LOGD("Data of length %u received on stream %u with SSN %u, TSN %u, PPID %u",
-       (uint32_t)len,
-       recv_info.rcv_sid,
-       recv_info.rcv_ssn,
-       recv_info.rcv_tsn,
-       ntohl(recv_info.rcv_ppid));
   if (flags & MSG_NOTIFICATION) {
     sctp_process_notification(sctp, (union sctp_notification*)data, len);
   } else {
     sctp_handle_incoming_data(sctp, data, len, ntohl(recv_info.rcv_ppid), recv_info.rcv_sid, flags);
   }
-  free(data);  // we need to free the memory that usrsctp allocates
+  free(data);
   return 0;
 }
 #endif
