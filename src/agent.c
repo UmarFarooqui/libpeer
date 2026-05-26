@@ -14,7 +14,7 @@
 
 #define AGENT_POLL_TIMEOUT 1
 #define AGENT_CONNCHECK_MAX 200
-#define AGENT_CONNCHECK_PERIOD 100
+#define AGENT_CONNCHECK_PERIOD 5
 #define AGENT_STUN_RECV_MAXTIMES 1000
 
 void agent_clear_candidates(Agent* agent) {
@@ -278,6 +278,14 @@ void agent_gather_candidate(Agent* agent, const char* urls, const char* username
         printf("[T+%dms] STUN binding request start\n", (int)ports_get_epoch_time());
         agent_create_stun_addr(agent, &resolved_addr);
         printf("[T+%dms] STUN binding request done (local_candidates=%d)\n", (int)ports_get_epoch_time(), agent->local_candidates_count);
+        {
+          int ci;
+          for (ci = 0; ci < agent->local_candidates_count; ci++) {
+            char ca[46];
+            addr_to_string(&agent->local_candidates[ci].addr, ca, sizeof(ca));
+            printf("[libpeer] Local candidate %d: %s:%d type=%d\n", ci, ca, agent->local_candidates[ci].addr.port, agent->local_candidates[ci].type);
+          }
+        }
       } else if (strncmp(urls, "turn:", 5) == 0) {
         LOGD("Create turn addr");
         agent_create_turn_addr(agent, &resolved_addr, username, credential);
@@ -335,6 +343,7 @@ static void agent_create_binding_request(Agent* agent, StunMessage* msg) {
   char username[584];
   memset(username, 0, sizeof(username));
   snprintf(username, sizeof(username), "%s:%s", agent->remote_ufrag, agent->local_ufrag);
+  printf("[ICE-DBG] req username='%s' pwd_len=%d\n", username, (int)strlen(agent->remote_upwd));
   stun_msg_write_attr(msg, STUN_ATTR_TYPE_USERNAME, strlen(username), username);
   stun_msg_write_attr(msg, STUN_ATTR_TYPE_PRIORITY, 4, (char*)&agent->nominated_pair->priority);
   if (agent->mode == AGENT_MODE_CONTROLLING) {
@@ -355,8 +364,11 @@ void agent_process_stun_request(Agent* agent, StunMessage* stun_msg, Address* ad
         header = (StunHeader*)stun_msg->buf;
         memcpy(agent->transaction_id, header->transaction_id, sizeof(header->transaction_id));
         agent_create_binding_response(agent, &msg, addr);
-        agent_socket_send(agent, addr, msg.buf, msg.size);
+        int sr = agent_socket_send(agent, addr, msg.buf, msg.size);
+        printf("[ICE-DBG] sent binding response (%d bytes, ret=%d)\n", msg.size, sr);
         agent->binding_request_time = ports_get_epoch_time();
+      } else {
+        printf("[ICE-DBG] STUN request validation FAILED (local_upwd len=%d)\n", (int)strlen(agent->local_upwd));
       }
       break;
     default:
@@ -385,13 +397,10 @@ int agent_recv(Agent* agent, uint8_t* buf, int len) {
     stun_msg.size = ret;
     stun_parse_msg_buf(&stun_msg);
     switch (stun_msg.stunclass) {
-      case STUN_CLASS_REQUEST: {
-        static int stun_req_count = 0;
-        if (stun_req_count++ == 0) {
-          printf("[libpeer] STUN request from remote\n");
-        }
+      case STUN_CLASS_REQUEST:
+        printf("[libpeer] STUN request from remote\n");
         agent_process_stun_request(agent, &stun_msg, &addr);
-      } break;
+        break;
       case STUN_CLASS_RESPONSE:
         printf("[libpeer] STUN response received!\n");
         agent_process_stun_response(agent, &stun_msg);
@@ -527,11 +536,13 @@ int agent_connectivity_check(Agent* agent) {
   }
 
   // Drain all pending packets — a single recv may consume
-  // a binding request while a binding response is also queued
+  // a binding request while a binding response is also queued.
+  // agent_recv returns 0 for processed STUN, >0 for non-STUN, <0 for no data.
   {
     int rx;
     for (rx = 0; rx < 5; rx++) {
-      if (agent_recv(agent, buf, sizeof(buf)) <= 0) break;
+      int r = agent_recv(agent, buf, sizeof(buf));
+      if (r < 0) break;  // no data
       if (agent->nominated_pair->state == ICE_CANDIDATE_STATE_SUCCEEDED) break;
     }
   }

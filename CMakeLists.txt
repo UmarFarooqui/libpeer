@@ -6,8 +6,6 @@ include(${CMAKE_CURRENT_LIST_DIR}/third_party/coreMQTT/mqttFilePaths.cmake)
 
 if (DEFINED ENV{IDF_PATH})
   file(GLOB ESP32_CODES "./src/*.c")
-  list(REMOVE_ITEM ESP32_CODES "${CMAKE_CURRENT_LIST_DIR}/src/ports.c")
-  list(APPEND ESP32_CODES "${CMAKE_CURRENT_LIST_DIR}/pal/esp32/ports_esp32.c")
   idf_component_register(
    SRCS ${ESP32_CODES} ${HTTP_SOURCES} ${MQTT_SOURCES} ${MQTT_SERIALIZER_SOURCES}
    INCLUDE_DIRS "./include" ${HTTP_INCLUDE_PUBLIC_DIRS} ${MQTT_INCLUDE_PUBLIC_DIRS}

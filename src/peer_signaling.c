@@ -16,7 +16,7 @@
 #include "utils.h"
 
 #define KEEP_ALIVE_TIMEOUT_SECONDS 60
-#define CONNACK_RECV_TIMEOUT_MS 5000
+#define CONNACK_RECV_TIMEOUT_MS 1000
 
 #define PATH_MAX_LEN 128
 #define HOST_MAX_LEN 64
@@ -411,7 +411,7 @@ static int peer_signaling_mqtt_connect(const char* hostname, int port) {
 
   memset(&conn_info, 0, sizeof(conn_info));
 
-  conn_info.cleanSession = true;
+  conn_info.cleanSession = false;
 
   if (strlen(g_ps.token) > 0) {
     peer_signaling_resolve_token(g_ps.token, username, password);

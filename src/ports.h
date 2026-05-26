@@ -13,7 +13,7 @@
  * implementation in a separate file under pal/<platform>/ports_<platform>.c.
  *
  * Core libpeer files must NEVER include platform headers (FreeRTOS.h,
- * task.h, lwip/ *.h, etc.) directly -- use these functions instead.
+ * task.h, lwip/*.h, etc.) directly — use these functions instead.
  */
 
 /* ---- Timing ---- */

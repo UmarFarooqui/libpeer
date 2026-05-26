@@ -20,7 +20,6 @@
 
 #define STATE_CHANGED(pc, curr_state)                                 \
   if (pc->oniceconnectionstatechange && pc->state != curr_state) {    \
-    printf("[T+%dms] PeerConnectionState: %d\n", (int)ports_get_epoch_time(), curr_state); \
     pc->oniceconnectionstatechange(curr_state, pc->config.user_data); \
     pc->state = curr_state;                                           \
   }
@@ -59,31 +58,14 @@ static void peer_connection_outgoing_rtp_packet(uint8_t* data, size_t size, void
   agent_send(&pc->agent, data, size);
 }
 
-/*
- * Reassemble fragmented DTLS handshake messages.
- *
- * The browser may fragment the ClientHello across multiple DTLS records
- * (separate UDP datagrams) when it exceeds the ~1200-byte path MTU.
- * ESP-IDF's mbedTLS does not support ClientHello reassembly, so we
- * defragment here before returning the data.
- *
- * DTLS record header  = 13 bytes (type[1] ver[2] epoch[2] seq[6] len[2])
- * Handshake msg header = 12 bytes (type[1] len[3] seq[2] frag_off[3] frag_len[3])
- */
-#define DTLS_REC_HDR  13
-#define DTLS_HS_HDR   12
-#define REASM_BUF_SZ  4096
-
 static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t len) {
   int ret = -1;
   DtlsSrtp* dtls_srtp = (DtlsSrtp*)ctx;
   PeerConnection* pc = (PeerConnection*)dtls_srtp->user_data;
 
-  if (pc->agent_ret > 0 && (size_t)pc->agent_ret <= len) {
+  if (pc->agent_ret > 0 && pc->agent_ret <= len) {
     memcpy(buf, pc->agent_buf, pc->agent_ret);
-    ret = pc->agent_ret;
-    pc->agent_ret = 0;
-    return ret;
+    return pc->agent_ret;
   }
 
   // Try for ~100ms (100 iterations × 1ms select timeout).
@@ -96,69 +78,6 @@ static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t 
       ret = agent_recv(&pc->agent, buf, len);
       if (ret > 0) {
         printf("[DTLS-recv] got %d bytes (first byte: 0x%02x)\n", ret, buf[0]);
-
-        /* Detect fragmented DTLS handshake and reassemble */
-        if (ret >= (DTLS_REC_HDR + DTLS_HS_HDR) && buf[0] == 0x16) {
-          uint32_t total_len = ((uint32_t)buf[14] << 16) | ((uint32_t)buf[15] << 8) | buf[16];
-          uint32_t frag_off  = ((uint32_t)buf[19] << 16) | ((uint32_t)buf[20] << 8) | buf[21];
-          uint32_t frag_len  = ((uint32_t)buf[22] << 16) | ((uint32_t)buf[23] << 8) | buf[24];
-
-          if (frag_len < total_len) {
-            /* Fragmented handshake — reassemble into single record */
-            static uint8_t reasm[REASM_BUF_SZ];
-            uint32_t payload = DTLS_HS_HDR + total_len;
-            uint32_t reasm_total = DTLS_REC_HDR + payload;
-
-            if (reasm_total > sizeof(reasm) || reasm_total > len) {
-              LOGE("DTLS reasm too large: %u bytes", (unsigned)reasm_total);
-              return MBEDTLS_ERR_SSL_WANT_READ;
-            }
-
-            /* Record header: copy original, update length */
-            memcpy(reasm, buf, DTLS_REC_HDR);
-            reasm[11] = (uint8_t)(payload >> 8);
-            reasm[12] = (uint8_t)(payload);
-
-            /* Handshake header: type + length + msg_seq from original,
-             * set frag_offset=0, frag_length=total_len */
-            memcpy(reasm + DTLS_REC_HDR, buf + DTLS_REC_HDR, 6); /* type[1]+len[3]+seq[2] */
-            reasm[19] = 0; reasm[20] = 0; reasm[21] = 0;
-            reasm[22] = buf[14]; reasm[23] = buf[15]; reasm[24] = buf[16];
-
-            /* Copy first fragment data */
-            memcpy(reasm + DTLS_REC_HDR + DTLS_HS_HDR + frag_off, buf + DTLS_REC_HDR + DTLS_HS_HDR, frag_len);
-            uint32_t received = frag_len;
-
-
-            /* Receive remaining fragments */
-            while (received < total_len) {
-              uint8_t fbuf[1400];
-              int fret = -1, j;
-              for (j = 0; j < 500; j++) {
-                fret = agent_recv(&pc->agent, fbuf, sizeof(fbuf));
-                if (fret > 0) break;
-              }
-              if (fret <= 0) {
-                LOGW("DTLS reasm timeout");
-                return MBEDTLS_ERR_SSL_WANT_READ;
-              }
-              if (fret >= (DTLS_REC_HDR + DTLS_HS_HDR) && fbuf[0] == 0x16) {
-                uint32_t fo = ((uint32_t)fbuf[19] << 16) | ((uint32_t)fbuf[20] << 8) | fbuf[21];
-                uint32_t fl = ((uint32_t)fbuf[22] << 16) | ((uint32_t)fbuf[23] << 8) | fbuf[24];
-                if (fo + fl <= total_len) {
-                  memcpy(reasm + DTLS_REC_HDR + DTLS_HS_HDR + fo, fbuf + DTLS_REC_HDR + DTLS_HS_HDR, fl);
-                  received += fl;
-
-                }
-              }
-            }
-
-
-            memcpy(buf, reasm, reasm_total);
-            return (int)reasm_total;
-          }
-        }
-
         return ret;
       }
     }
@@ -372,7 +291,9 @@ int peer_connection_create_datachannel_sid(PeerConnection* pc, DecpChannelType c
 }
 
 static char* peer_connection_dtls_role_setup_value(DtlsSrtpRole d) {
-  return d == DTLS_SRTP_ROLE_SERVER ? "a=setup:passive" : "a=setup:active";
+  // Offerer must advertise actpass (RFC 8842 Section 5.2).
+  // We always act as DTLS client regardless, to avoid fragmented ClientHello.
+  return d == DTLS_SRTP_ROLE_SERVER ? "a=setup:passive" : "a=setup:actpass";
 }
 
 int peer_connection_loop(PeerConnection* pc) {
@@ -385,6 +306,7 @@ int peer_connection_loop(PeerConnection* pc) {
       break;
 
     case PEER_CONNECTION_CHECKING: {
+      static int check_log_count = 0;
       int sel = agent_select_candidate_pair(&pc->agent);
       if (sel < 0) {
         printf("[libpeer] All candidate pairs failed\n");
@@ -393,10 +315,9 @@ int peer_connection_loop(PeerConnection* pc) {
         printf("[T+%dms] Connectivity check succeeded!\n", (int)ports_get_epoch_time());
         STATE_CHANGED(pc, PEER_CONNECTION_CONNECTED);
       } else {
-        static int check_count = 0;
-        if (check_count++ % 50 == 0) {
-          printf("[libpeer] Checking... (pair=%d conncheck=%d)\n",
-                 sel, check_count - 1);
+        if (check_log_count++ % 500 == 0) {
+          printf("[libpeer] Checking... (pair conncheck=%d)\n",
+                 pc->agent.nominated_pair ? pc->agent.nominated_pair->conncheck : -1);
         }
       }
     } break;
@@ -404,9 +325,10 @@ int peer_connection_loop(PeerConnection* pc) {
     case PEER_CONNECTION_CONNECTED:
 
       if (dtls_srtp_handshake(&pc->dtls_srtp, NULL) == 0) {
+        LOGD("DTLS-SRTP handshake done");
 
         if (pc->config.datachannel) {
-          printf("[libpeer] SCTP create socket\n");
+          LOGI("SCTP create socket");
           sctp_create_association(&pc->sctp, &pc->dtls_srtp);
           pc->sctp.userdata = pc->config.user_data;
         }
@@ -418,9 +340,9 @@ int peer_connection_loop(PeerConnection* pc) {
 #if CONFIG_USE_USRSCTP
       // Pump usrsctp timers — replaces the timer thread that
       // usrsctp_init() would have created (we use _nothreads).
-      // The main loop runs every ~1ms via vTaskDelay(1), so advance
-      // by 1ms to keep SCTP timers in sync with real time.
-      usrsctp_handle_timers(1);
+      // The main loop runs every ~1ms, so we advance 10ms worth
+      // of ticks to maintain proper SCTP retransmission timing.
+      usrsctp_handle_timers(10);
 #endif
       if ((pc->agent_ret = agent_recv(&pc->agent, pc->agent_buf, sizeof(pc->agent_buf))) > 0) {
         LOGD("agent_recv %d", pc->agent_ret);
@@ -483,7 +405,6 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
   DtlsSrtpRole role = DTLS_SRTP_ROLE_SERVER;
   int is_update = 0;
   Agent* agent = &pc->agent;
-  (void)role;
 
   while ((line = strstr(start, "\r\n"))) {
     line = strstr(start, "\r\n");
@@ -527,7 +448,6 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
   if (type == SDP_TYPE_ANSWER) {
     agent_update_candidate_pairs(&pc->agent);
     printf("[T+%dms] Candidate pairs formed\n", (int)ports_get_epoch_time());
-
     STATE_CHANGED(pc, PEER_CONNECTION_CHECKING);
   }
 }
@@ -542,7 +462,8 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
 
   switch (sdp_type) {
     case SDP_TYPE_OFFER:
-      role = DTLS_SRTP_ROLE_SERVER;
+      // Always be DTLS client to avoid fragmented ClientHello from browser
+      role = DTLS_SRTP_ROLE_CLIENT;
       agent_clear_candidates(&pc->agent);
       pc->agent.mode = AGENT_MODE_CONTROLLING;
       break;
@@ -605,6 +526,8 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
 
   agent_get_local_description(&pc->agent, description, sizeof(pc->temp_buf));
   sdp_append(pc->sdp, description);
+
+  printf("[T+%dms] SDP ready (local_candidates=%d)\n", (int)ports_get_epoch_time(), pc->agent.local_candidates_count);
 
   if (pc->onicecandidate) {
     pc->onicecandidate(pc->sdp, pc->config.user_data);
